@@ -126,8 +126,8 @@ end
 
 cmd = opt_parse()
 
-exit unless HbaseCtl.validate_user
-exit unless HbaseCtl.renew_ticket
+#exit unless HbaseCtl.validate_user
+#exit unless HbaseCtl.renew_ticket
 
 HbaseCtl.dryrun = true if command_options[:dryrun]
 HbaseCtl.log("#{HbaseCtl.hostname}:#{appname} running in dryrun mode") if HbaseCtl.dryrun
