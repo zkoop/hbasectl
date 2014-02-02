@@ -1,0 +1,261 @@
+#!/bin/env jruby
+
+$: << File.join(File.dirname(__FILE__), "..","lib") 
+
+require 'subcommand'
+require 'hbasectl'
+require 'hbasectl/tools'
+require 'hbasectl/tools/compactor'
+require 'hbasectl/tools/splitter'
+require 'hbasectl/tools/list'
+
+include SubCommands
+
+global_options = {} 
+command_options = {}
+appname = File.basename($0)
+
+HbaseCtl.runas = ENV["HBASE_USER"] || HbaseCtl.current_user 
+
+global_options do |opts|
+  opts.banner = "Usage: #{appname} [options] [subcommand [options]]"
+  opts.description = "Hbase Ctl script"
+  opts.separator  ''
+  opts.separator  'Global Options are'
+  opts.on("-v", "--[no-]verbose", "Show/Disable stderr outputs from hbase and zookeeper") do |v|
+    global_options[:verbose] = v
+  end
+end
+
+# disable zookeepr and hbase INFO , DEBUG messages
+
+global_options[:verbose] = false unless global_options.has_key?(:verbose)
+HbaseCtl.debug =  global_options[:verbose]
+
+
+add_help_option
+
+command :compact do |opts|
+  opts.banner = "Usage: compact [options]"
+  opts.description = "compact hbase table/regions"
+  opts.on("-f", "--file FILE_WITH_REGIONS", "Input file with the list of table/regions to compact") do |f|
+    command_options[:file] = f
+  end
+  
+  opts.on("-g", "--cluster CLUSTER", "The cluster to run the compaction") do |c|
+    command_options[:cluster] = c
+  end
+
+  opts.on("-p" , "--percent CHUNK", Numeric,  "Percentage of regions to compact simultaneously") do |p|
+    command_options[:percent] = p
+  end
+
+  opts.on("-c", "--concurrency CONCURRENCY", "Number of concurrent threads to run") do |c|
+    command_options[:concurrency] = c
+  end
+
+  opts.on("-n", "--[no-]dryrun", "Lists the actions the command will take without actually performing them") do |n|
+    command_options[:dryrun] = n
+  end
+
+  opts.on("-r", "--region REGION", "Compact a region") do |r|
+    command_options[:region] = r
+  end
+
+  opts.on("-t", "--table TABLE", "Compact a table") do |t|
+    command_options[:table] = t
+  end
+
+  opts.on("-T", "--type MAJOR_OR_MINOR", "Major or Minor compaction. Default major") do |m|
+    command_options[:type] = m
+  end
+
+end
+
+command :split do |opts|
+  opts.banner = "Usage: split [options]"
+  opts.description = "split  hbase table/regions"
+  opts.on("-f", "--file FILE_WITH_REGIONS", "Input file with the list of table/regions to split") do |f|
+    command_options[:file] = f
+  end
+
+  opts.on("-g", "--cluster CLUSTER", "The cluster to run the split") do |c|
+    command_options[:cluster] = c
+  end
+
+  opts.on("-p", "--percent CHUNK", Numeric, "Percentage of regions to split simultaneously") do |p|
+    command_options[:percent] = p
+  end
+
+  opts.on("-c","--concurrency CONCURRENCY", "Number of concurrent threads to run") do |c|
+    command_coptions[:concurrency] = c
+  end
+
+  opts.on("-n","--[no-]dryrun", "Lists the actions the command will take without actually performing them") do |n|
+    command_options[:dryrun] = n
+  end
+
+  opts.on("-r","--region REGION", "Split a region") do |r|
+    command_options[:region] = r
+  end
+
+  opts.on("-t", "--table TABLE", "Split a table") do |t|
+    command_options[:table] = t
+  end
+end
+
+command :list_regions do |opts|
+  opts.banner = "Usage: list_regions [options]"
+  opts.description = "list the regions of a table"
+  opts.on("-t", "--table TABLE_NAME", "Table  to list the regions") do |t|
+    command_options[:table] = t
+  end
+end
+
+command :status do |opts|
+  opts.banner = "Usage: status [options]"
+  opts.description = "show the status of region or table"
+  opts.on("-r","--region REGION","Region name to show the status") do |r|
+    command_options[:region] = r
+  end
+
+  opts.on("-t","--table TABLE_NAME", "Table to show the status") do |t|
+    command_options[:table] = t
+  end
+end
+
+cmd = opt_parse()
+
+exit unless HbaseCtl.validate_user
+exit unless HbaseCtl.renew_ticket
+
+HbaseCtl.dryrun = true if command_options[:dryrun]
+HbaseCtl.log("#{HbaseCtl.hostname}:#{appname} running in dryrun mode") if HbaseCtl.dryrun
+
+case cmd
+  when "compact"
+
+    command_options[:type] = "major" unless command_options.has_key?(:type)
+    # command line options --region or --table take precedence over --file based input. This will call compaction on a table/region passed in commandline
+    if command_options[:table] && command_options[:region]
+      #if both table and region is specified compact the region
+      hb_admin = HbaseCtl::Admin.new
+      if hb_admin.get_region(command_options[:region]).nil?
+        HbaseCtl.log("#{HbaseCtl.hostname}:#{appname} invalid region #{command_options[:region]} for table #{command_options[:table]}")
+        exit
+      end
+
+      HbaseCtl.log("#{HbaseCtl.hostname}:#{appname} #{command_options[:type]} compacting table: #{command_options[:table]} region: #{command_options[:region]}")
+
+      hb_admin.compact(command_options[:region],{:type => command_options[:type]} )
+
+      HbaseCtl.log("#{HbaseCtl.hostname}:#{appname} check the status of compaction using #{appname} status --region")
+      exit
+    elsif command_options[:table]
+      hb_admin = HbaseCtl::Admin.new
+      unless hb_admin.table_exist?(command_options[:table])
+        HbaseCtl.log("#{HbaseCtl.hostname}:#{appname} table #{command_options[:table]} doesn't exist")
+        exit
+      end
+
+      HbaseCtl.log("#{HbaseCtl.hostname}:#{appname} #{command_options[:type]} compacting table: #{command_options[:table]} ")
+
+      hb_admin.compact(command_options[:table],{:type => command_options[:type]} )
+
+      HbaseCtl.log("#{HbaseCtl.hostname}:#{appname} check the status of compaction using #{appname} status --table")
+      exit
+    elsif command_options[:region]
+      hb_admin = HbaseCtl::Admin.new
+      if hb_admin.get_region(command_options[:region]).nil?
+        HbaseCtl.log("#{HbaseCtl.hostname}:#{appname} invalid region #{command_options[:region]}")
+        exit
+      end
+
+      HbaseCtl.log("#{HbaseCtl.hostname}:#{appname} #{command_options[:type]} compacting  region: #{command_options[:region]}")
+
+      hb_admin.compact(command_options[:region],{:type => command_options[:type]} )
+
+      HbaseCtl.log("#{HbaseCtl.hostname}:#{appname} check the status of compaction using #{appname} status --region")
+      exit
+    end
+
+    unless command_options[:file] || command_options[:cluster]
+      print_help
+      exit 1
+    end
+
+   compactor = HbaseCtl::Tools::Compactor.new(command_options)
+   compactor.run!
+
+  when "split"
+    # command line options --region or --table take precedence over --file based input. This will call split on a table/region passed in commandline
+    if command_options[:table] && command_options[:region]
+      hb_admin = HbaseCtl::Admin.new
+
+      if hb_admin.get_region(command_options[:region]).nil?
+        HbaseCtl.log("#{HbaseCtl.hostname}:#{appname} invalid region #{command_options[:region]} for table #{command_options[:table]}")
+        exit
+      end
+
+      HbaseCtl.log("#{HbaseCtl.hostname}:#{appname} splitting table: #{command_options[:table]} region: #{command_options[:region]}")
+
+      hb_admin.split(command_options[:region])
+
+      HbaseCtl.log("#{HbaseCtl.hostname}:#{appname} check the status of split using #{appname} status --region")
+      exit
+    elsif command_options[:table]
+      hb_admin = HbaseCtl::Admin.new
+
+      unless hb_admin.table_exist?(command_options[:table])
+        HbaseCtl.log("#{HbaseCtl.hostname}:#{appname} table #{command_options[:table]} doesn't exist")
+        exit
+      end
+
+      HbaseCtl.log("#{HbaseCtl.hostname}:#{appname} splitting table: #{command_options[:table]} ")
+
+      hb_admin.split(command_options[:table])
+
+      HbaseCtl.log("#{HbaseCtl.hostname}:#{appname} check the status of split using #{appname} status --table")
+      exit
+    elsif command_options[:region]
+      hb_admin = HbaseCtl::Admin.new
+
+      if hb_admin.get_region(command_options[:region]).nil?
+        HbaseCtl.log("#{HbaseCtl.hostname}:#{appname} invalid region #{command_options[:region]}")
+        exit
+      end
+
+      HbaseCtl.log("#{HbaseCtl.hostname}:#{appname} splitting  region: #{command_options[:region]}")
+
+      hb_admin.split(command_options[:region])
+
+      HbaseCtl.log("#{HbaseCtl.hostname}:#{appname} check the status of split using #{appname} status --region")
+      exit
+    end
+
+    unless command_options[:file] || command_options[:cluster]
+      print_help
+      exit 1
+    end
+
+    splitter = HbaseCtl::Tools::Splitter.new(command_options)
+    splitter.run!
+
+  when "list_regions"
+
+    unless command_options[:table]
+      print_help
+      exit 1
+    end
+    action = HbaseCtl::Tools::List.new()
+    action.list_regions(command_options[:table])
+
+  when "status"
+    if command_options[:region]
+      action = HbaseCtl::Tools::List.new()
+      action.list_region(command_options[:region])
+    elsif command_options[:table]
+      action = HbaseCtl::Tools::List.new()
+      action.list_table(command_options[:table])
+    end
+end 
